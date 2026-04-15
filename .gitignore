@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.vercel
+*.db
+*.js.map
+api/**/*.js
+tests/**/*.js
+public
