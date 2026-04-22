@@ -31,6 +31,7 @@ const LIST_QUERY_KEYS = new Set([
   'limit',
 ]);
 const SEARCH_QUERY_KEYS = new Set(['q', 'page', 'limit']);
+const INTERNAL_QUERY_KEYS = new Set(['path']);
 
 type QueryValidationResult =
   | {
@@ -165,7 +166,7 @@ function localSearchResponse(
 }
 
 function validateListQuery(query: Request['query']): QueryValidationResult {
-  if (Object.keys(query).some((key) => !LIST_QUERY_KEYS.has(key))) {
+  if (Object.keys(query).some((key) => !LIST_QUERY_KEYS.has(key) && !INTERNAL_QUERY_KEYS.has(key))) {
     return { valid: false };
   }
 
@@ -220,7 +221,7 @@ function validateListQuery(query: Request['query']): QueryValidationResult {
 }
 
 function validateSearchPagination(query: Request['query']): { valid: true; page: number; limit: number } | { valid: false } {
-  if (Object.keys(query).some((key) => !SEARCH_QUERY_KEYS.has(key))) {
+  if (Object.keys(query).some((key) => !SEARCH_QUERY_KEYS.has(key) && !INTERNAL_QUERY_KEYS.has(key))) {
     return { valid: false };
   }
 
