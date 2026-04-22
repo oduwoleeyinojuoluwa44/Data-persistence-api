@@ -1,6 +1,13 @@
-import { Entity, PrimaryColumn, Column, CreateDateColumn } from 'typeorm';
+import { Entity, PrimaryColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
 @Entity('profiles')
+@Index(['gender'])
+@Index(['age_group'])
+@Index(['country_id'])
+@Index(['age'])
+@Index(['gender_probability'])
+@Index(['country_probability'])
+@Index(['created_at'])
 export class Profile {
   @PrimaryColumn('uuid')
   id!: string;
@@ -15,9 +22,6 @@ export class Profile {
   gender_probability!: number;
 
   @Column()
-  sample_size!: number;
-
-  @Column()
   age!: number;
 
   @Column()
@@ -26,9 +30,13 @@ export class Profile {
   @Column()
   country_id!: string;
 
+  @Column()
+  country_name!: string;
+
   @Column('float')
   country_probability!: number;
 
   @CreateDateColumn()
   created_at!: Date;
 }
+
