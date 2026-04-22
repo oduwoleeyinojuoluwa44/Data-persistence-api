@@ -27,7 +27,7 @@ export class Profile {
   @Column()
   age_group!: string;
 
-  @Column()
+  @Column({ length: 2 })
   country_id!: string;
 
   @Column()

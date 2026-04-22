@@ -11,29 +11,28 @@ export interface ParsedQuery {
 const AGE_GROUP_KEYWORDS: Record<string, string> = {
   child: 'child',
   children: 'child',
-  kid: 'kid',
+  kid: 'child',
   kids: 'child',
   baby: 'child',
   toddler: 'child',
   teenager: 'teenager',
+  teenagers: 'teenager',
   teen: 'teenager',
+  teens: 'teenager',
   adolescent: 'teenager',
-  youth: 'teenager',
-  young: 'teenager',
   adult: 'adult',
   adults: 'adult',
-  man: 'adult',
-  woman: 'adult',
-  men: 'adult',
-  women: 'adult',
   senior: 'senior',
+  seniors: 'senior',
   elderly: 'senior',
   old: 'senior',
   retiree: 'senior',
+  retirees: 'senior',
 };
 
 const GENDER_KEYWORDS: Record<string, string> = {
   male: 'male',
+  males: 'male',
   man: 'male',
   men: 'male',
   boy: 'male',
@@ -41,6 +40,7 @@ const GENDER_KEYWORDS: Record<string, string> = {
   guys: 'male',
   guy: 'male',
   female: 'female',
+  females: 'female',
   woman: 'female',
   women: 'female',
   girl: 'female',
@@ -52,6 +52,10 @@ const GENDER_KEYWORDS: Record<string, string> = {
 const COUNTRY_MAPPING: Record<string, string | null> = {
   nigeria: 'NG',
   nigerian: 'NG',
+  angola: 'AO',
+  angolan: 'AO',
+  algeria: 'DZ',
+  algerian: 'DZ',
   ghana: 'GH',
   ghanaian: 'GH',
   kenya: 'KE',
@@ -66,11 +70,19 @@ const COUNTRY_MAPPING: Record<string, string | null> = {
   african: null,
   egypt: 'EG',
   egyptian: 'EG',
+  ethiopia: 'ET',
+  ethiopian: 'ET',
+  sudan: 'SD',
+  sudanese: 'SD',
+  south_sudan: 'SS',
+  southsudan: 'SS',
   cameroon: 'CM',
-  camerounian: 'CM',
+  cameroonian: 'CM',
   benin: 'BJ',
   beninese: 'BJ',
   côte_d_ivoire: 'CI',
+  cote_d_ivoire: 'CI',
+  cote_divoire: 'CI',
   ivory_coast: 'CI',
   ivorycoast: 'CI',
   senegal: 'SN',
@@ -91,8 +103,55 @@ const COUNTRY_MAPPING: Record<string, string | null> = {
   gambian: 'GM',
   guinea: 'GN',
   guinean: 'GN',
+  guinea_bissau: 'GW',
+  guineabissau: 'GW',
   mauritania: 'MR',
   mauritanian: 'MR',
+  morocco: 'MA',
+  moroccan: 'MA',
+  tunisia: 'TN',
+  tunisian: 'TN',
+  madagascar: 'MG',
+  malagasy: 'MG',
+  mozambique: 'MZ',
+  mozambican: 'MZ',
+  zambia: 'ZM',
+  zambian: 'ZM',
+  zimbabwe: 'ZW',
+  zimbabwean: 'ZW',
+  rwanda: 'RW',
+  rwandan: 'RW',
+  burundi: 'BI',
+  burundian: 'BI',
+  botswana: 'BW',
+  namibia: 'NA',
+  namibian: 'NA',
+  somalia: 'SO',
+  somali: 'SO',
+  eritrea: 'ER',
+  eritrean: 'ER',
+  gabon: 'GA',
+  gabonese: 'GA',
+  malawi: 'MW',
+  malawian: 'MW',
+  chad: 'TD',
+  chadian: 'TD',
+  libya: 'LY',
+  libyan: 'LY',
+  comoros: 'KM',
+  comorian: 'KM',
+  djibouti: 'DJ',
+  mauritius: 'MU',
+  seychelles: 'SC',
+  lesotho: 'LS',
+  eswatini: 'SZ',
+  cape_verde: 'CV',
+  republic_of_the_congo: 'CG',
+  congo: 'CG',
+  dr_congo: 'CD',
+  democratic_republic_of_the_congo: 'CD',
+  central_african_republic: 'CF',
+  western_sahara: 'EH',
   united_states: 'US',
   usa: 'US',
   united_kingdom: 'GB',
@@ -151,6 +210,21 @@ const AGE_MAPPINGS: Record<string, { min: number; max: number }> = {
   middleaged: { min: 35, max: 55 },
 };
 
+function normalizeToken(token: string): string {
+  return token
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function setMinAge(current: number | undefined, next: number): number {
+  return current === undefined ? next : Math.max(current, next);
+}
+
+function setMaxAge(current: number | undefined, next: number): number {
+  return current === undefined ? next : Math.min(current, next);
+}
+
 export function parseNaturalLanguageQuery(query: string): ParsedQuery | null {
   const lowerQuery = query.toLowerCase().trim();
 
@@ -159,9 +233,9 @@ export function parseNaturalLanguageQuery(query: string): ParsedQuery | null {
   }
 
   const result: ParsedQuery = {};
-  const words = lowerQuery.split(/\s+/);
+  const words = lowerQuery.split(/\s+/).map(normalizeToken).filter(Boolean);
 
-  let gender: string | undefined;
+  const genders: Set<string> = new Set();
   const ageGroups: Set<string> = new Set();
   let countryId: string | undefined;
   let minAge: number | undefined;
@@ -171,8 +245,14 @@ export function parseNaturalLanguageQuery(query: string): ParsedQuery | null {
     const word = words[i];
     const nextWord = i + 1 < words.length ? words[i + 1] : '';
 
-    if (!gender && GENDER_KEYWORDS[word]) {
-      gender = GENDER_KEYWORDS[word];
+    if (GENDER_KEYWORDS[word]) {
+      genders.add(GENDER_KEYWORDS[word]);
+    }
+
+    if (AGE_MAPPINGS[word]) {
+      const ageRange = AGE_MAPPINGS[word];
+      minAge = setMinAge(minAge, ageRange.min);
+      maxAge = setMaxAge(maxAge, ageRange.max);
       continue;
     }
 
@@ -181,22 +261,15 @@ export function parseNaturalLanguageQuery(query: string): ParsedQuery | null {
       continue;
     }
 
-    if (AGE_MAPPINGS[word]) {
-      const ageRange = AGE_MAPPINGS[word];
-      minAge = Math.min(minAge ?? 150, ageRange.min);
-      maxAge = Math.max(maxAge ?? 0, ageRange.max);
-      continue;
-    }
-
     if (word === 'above' || word === 'over' || word === 'older') {
       const ageStr = nextWord;
       if (/^\d+$/.test(ageStr)) {
-        minAge = Math.min(minAge ?? 150, parseInt(ageStr, 10));
+        minAge = setMinAge(minAge, parseInt(ageStr, 10));
       }
     } else if (word === 'below' || word === 'under' || word === 'younger') {
       const ageStr = nextWord;
       if (/^\d+$/.test(ageStr)) {
-        maxAge = Math.max(maxAge ?? 0, parseInt(ageStr, 10));
+        maxAge = setMaxAge(maxAge, parseInt(ageStr, 10));
       }
     }
 
@@ -219,7 +292,7 @@ export function parseNaturalLanguageQuery(query: string): ParsedQuery | null {
     }
   }
 
-  if (gender) result.gender = gender;
+  if (genders.size === 1) result.gender = Array.from(genders)[0];
   if (ageGroups.size > 0) result.age_group = Array.from(ageGroups);
   if (countryId) result.country_id = countryId;
   if (minAge !== undefined) result.min_age = minAge;

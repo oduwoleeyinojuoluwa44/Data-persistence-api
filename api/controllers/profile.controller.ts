@@ -3,7 +3,8 @@ import { uuidv7 } from 'uuidv7';
 import { ExternalApiService } from '../services/externalApi.service';
 import { getAgeGroup } from '../utils/classification';
 import { getCountryName } from '../utils/countryNames';
-import { parseNaturalLanguageQuery } from '../utils/queryParser';
+import { ParsedQuery, parseNaturalLanguageQuery } from '../utils/queryParser';
+import { getLocalSeedProfiles } from '../utils/localProfiles';
 import { z } from 'zod';
 import { AppDataSource, initializeDatabase } from '../database/data-source';
 import { Profile } from '../entities/Profile';
@@ -12,23 +13,238 @@ const createProfileSchema = z.object({
   name: z.string().min(1, "Missing or empty name"),
 });
 
+const VALID_GENDERS = new Set(['male', 'female']);
+const VALID_AGE_GROUPS = new Set(['child', 'teenager', 'adult', 'senior']);
+const VALID_SORT_FIELDS = new Set(['age', 'created_at', 'gender_probability']);
+const VALID_ORDERS = new Set(['asc', 'desc']);
+const LIST_QUERY_KEYS = new Set([
+  'gender',
+  'country_id',
+  'age_group',
+  'min_age',
+  'max_age',
+  'min_gender_probability',
+  'min_country_probability',
+  'sort_by',
+  'order',
+  'page',
+  'limit',
+]);
+const SEARCH_QUERY_KEYS = new Set(['q', 'page', 'limit']);
+
+type QueryValidationResult =
+  | {
+      valid: true;
+      page: number;
+      limit: number;
+      gender?: string;
+      country_id?: string;
+      age_group?: string;
+      min_age?: number;
+      max_age?: number;
+      min_gender_probability?: number;
+      min_country_probability?: number;
+      sort_by?: string;
+      order?: 'ASC' | 'DESC';
+    }
+  | { valid: false };
+
+function errorResponse(res: Response, status: number, message: string) {
+  return res.status(status).json({ status: 'error', message });
+}
+
+function singleQueryValue(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value) || typeof value !== 'string') return '';
+  return value.trim();
+}
+
+function parseIntegerParam(value: string | undefined, min: number, max?: number): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) return Number.NaN;
+  const parsed = Number.parseInt(value, 10);
+  if (parsed < min || (max !== undefined && parsed > max)) return Number.NaN;
+  return parsed;
+}
+
+function parseProbabilityParam(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^(0(\.\d+)?|1(\.0+)?)$/.test(value)) return Number.NaN;
+  return Number.parseFloat(value);
+}
+
+function serializeProfile(profile: Profile) {
+  return {
+    ...profile,
+    created_at: profile.created_at instanceof Date
+      ? profile.created_at.toISOString()
+      : new Date(profile.created_at).toISOString(),
+  };
+}
+
+function compareProfiles(a: Profile, b: Profile, sortBy = 'created_at'): number {
+  if (sortBy === 'age') {
+    return a.age - b.age;
+  }
+  if (sortBy === 'gender_probability') {
+    return a.gender_probability - b.gender_probability;
+  }
+
+  return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+}
+
+function applyValidatedFilters(profiles: Profile[], query: Extract<QueryValidationResult, { valid: true }>): Profile[] {
+  return profiles.filter((profile) => {
+    if (query.gender && profile.gender.toLowerCase() !== query.gender) return false;
+    if (query.country_id && profile.country_id.toUpperCase() !== query.country_id) return false;
+    if (query.age_group && profile.age_group.toLowerCase() !== query.age_group) return false;
+    if (query.min_age !== undefined && profile.age < query.min_age) return false;
+    if (query.max_age !== undefined && profile.age > query.max_age) return false;
+    if (query.min_gender_probability !== undefined && profile.gender_probability < query.min_gender_probability) return false;
+    if (query.min_country_probability !== undefined && profile.country_probability < query.min_country_probability) return false;
+    return true;
+  });
+}
+
+function applyParsedFilters(profiles: Profile[], parsedQuery: ParsedQuery): Profile[] {
+  return profiles.filter((profile) => {
+    if (parsedQuery.gender && profile.gender.toLowerCase() !== parsedQuery.gender) return false;
+    if (parsedQuery.country_id && profile.country_id.toUpperCase() !== parsedQuery.country_id) return false;
+    if (
+      parsedQuery.age_group &&
+      parsedQuery.age_group.length > 0 &&
+      !parsedQuery.age_group.includes(profile.age_group.toLowerCase())
+    ) {
+      return false;
+    }
+    if (parsedQuery.min_age !== undefined && profile.age < parsedQuery.min_age) return false;
+    if (parsedQuery.max_age !== undefined && profile.age > parsedQuery.max_age) return false;
+    if (parsedQuery.min_gender_probability !== undefined && profile.gender_probability < parsedQuery.min_gender_probability) {
+      return false;
+    }
+    if (parsedQuery.min_country_probability !== undefined && profile.country_probability < parsedQuery.min_country_probability) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function paginateProfiles(profiles: Profile[], page: number, limit: number): Profile[] {
+  return profiles.slice((page - 1) * limit, page * limit);
+}
+
+function localListResponse(res: Response, query: Extract<QueryValidationResult, { valid: true }>) {
+  const filtered = applyValidatedFilters(getLocalSeedProfiles(), query);
+  const sortDirection = query.order === 'ASC' ? 1 : -1;
+  const sorted = [...filtered].sort((a, b) => compareProfiles(a, b, query.sort_by) * sortDirection);
+
+  return res.status(200).json({
+    status: 'success',
+    page: query.page,
+    limit: query.limit,
+    total: sorted.length,
+    data: paginateProfiles(sorted, query.page, query.limit).map(serializeProfile),
+  });
+}
+
+function localSearchResponse(
+  res: Response,
+  parsedQuery: ParsedQuery,
+  pagination: { page: number; limit: number },
+) {
+  const filtered = applyParsedFilters(getLocalSeedProfiles(), parsedQuery);
+  const sorted = [...filtered].sort((a, b) => compareProfiles(a, b) * -1);
+
+  return res.status(200).json({
+    status: 'success',
+    page: pagination.page,
+    limit: pagination.limit,
+    total: sorted.length,
+    data: paginateProfiles(sorted, pagination.page, pagination.limit).map(serializeProfile),
+  });
+}
+
+function validateListQuery(query: Request['query']): QueryValidationResult {
+  if (Object.keys(query).some((key) => !LIST_QUERY_KEYS.has(key))) {
+    return { valid: false };
+  }
+
+  const gender = singleQueryValue(query.gender)?.toLowerCase();
+  const country_id = singleQueryValue(query.country_id)?.toUpperCase();
+  const age_group = singleQueryValue(query.age_group)?.toLowerCase();
+  const sort_by = singleQueryValue(query.sort_by)?.toLowerCase();
+  const order = singleQueryValue(query.order)?.toLowerCase();
+
+  if (gender !== undefined && !VALID_GENDERS.has(gender)) return { valid: false };
+  if (age_group !== undefined && !VALID_AGE_GROUPS.has(age_group)) return { valid: false };
+  if (country_id !== undefined && !/^[A-Z]{2}$/.test(country_id)) return { valid: false };
+  if (sort_by !== undefined && !VALID_SORT_FIELDS.has(sort_by)) return { valid: false };
+  if (order !== undefined && !VALID_ORDERS.has(order)) return { valid: false };
+
+  const min_age = parseIntegerParam(singleQueryValue(query.min_age), 0, 150);
+  const max_age = parseIntegerParam(singleQueryValue(query.max_age), 0, 150);
+  const min_gender_probability = parseProbabilityParam(singleQueryValue(query.min_gender_probability));
+  const min_country_probability = parseProbabilityParam(singleQueryValue(query.min_country_probability));
+  const page = parseIntegerParam(singleQueryValue(query.page) ?? '1', 1);
+  const limit = parseIntegerParam(singleQueryValue(query.limit) ?? '10', 1, 50);
+
+  if (
+    Number.isNaN(min_age) ||
+    Number.isNaN(max_age) ||
+    Number.isNaN(min_gender_probability) ||
+    Number.isNaN(min_country_probability) ||
+    Number.isNaN(page) ||
+    Number.isNaN(limit)
+  ) {
+    return { valid: false };
+  }
+
+  if (min_age !== undefined && max_age !== undefined && min_age > max_age) {
+    return { valid: false };
+  }
+
+  return {
+    valid: true,
+    page: page ?? 1,
+    limit: limit ?? 10,
+    gender,
+    country_id,
+    age_group,
+    min_age,
+    max_age,
+    min_gender_probability,
+    min_country_probability,
+    sort_by,
+    order: order === 'asc' ? 'ASC' : 'DESC',
+  };
+}
+
+function validateSearchPagination(query: Request['query']): { valid: true; page: number; limit: number } | { valid: false } {
+  if (Object.keys(query).some((key) => !SEARCH_QUERY_KEYS.has(key))) {
+    return { valid: false };
+  }
+
+  const page = parseIntegerParam(singleQueryValue(query.page) ?? '1', 1);
+  const limit = parseIntegerParam(singleQueryValue(query.limit) ?? '10', 1, 50);
+
+  if (Number.isNaN(page) || Number.isNaN(limit)) {
+    return { valid: false };
+  }
+
+  return { valid: true, page: page ?? 1, limit: limit ?? 10 };
+}
+
 export class ProfileController {
   static async createProfile(req: Request, res: Response) {
     try {
       await initializeDatabase();
-      const validation = createProfileSchema.safeParse(req.body);
-      if (!validation.success) {
-        return res.status(400).json({
-          status: 'error',
-          message: validation.error.issues[0]?.message || 'Invalid input',
-        });
+      if (req.body.name !== undefined && typeof req.body.name !== 'string') {
+        return errorResponse(res, 422, 'Invalid parameter type');
       }
 
-      if (typeof req.body.name !== 'string') {
-        return res.status(422).json({
-          status: 'error',
-          message: 'Invalid type',
-        });
+      const validation = createProfileSchema.safeParse(req.body);
+      if (!validation.success) {
+        return errorResponse(res, 400, validation.error.issues[0]?.message || 'Invalid input');
       }
 
       const name = req.body.name.toLowerCase();
@@ -41,10 +257,7 @@ export class ProfileController {
         return res.status(200).json({
           status: 'success',
           message: 'Profile already exists',
-          data: {
-            ...existingProfile,
-            created_at: existingProfile.created_at.toISOString(),
-          },
+          data: serializeProfile(existingProfile),
         });
       }
 
@@ -83,10 +296,7 @@ export class ProfileController {
 
       return res.status(201).json({
         status: 'success',
-        data: {
-          ...profile,
-          created_at: profile.created_at.toISOString(),
-        },
+        data: serializeProfile(profile),
       });
     } catch (error: any) {
       if (
@@ -99,10 +309,7 @@ export class ProfileController {
           message: error.message,
         });
       }
-      return res.status(500).json({
-        status: 'error',
-        message: 'Internal server failure',
-      });
+      return errorResponse(res, 500, 'Internal server failure');
     }
   }
 
@@ -114,80 +321,54 @@ export class ProfileController {
       const profile = await profileRepository.findOneBy({ id });
 
       if (!profile) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Profile not found',
-        });
+        return errorResponse(res, 404, 'Profile not found');
       }
 
       return res.status(200).json({
         status: 'success',
-        data: {
-          ...profile,
-          created_at: profile.created_at.toISOString(),
-        },
+        data: serializeProfile(profile),
       });
     } catch (error) {
-      return res.status(500).json({
-        status: 'error',
-        message: 'Internal server failure',
-      });
+      return errorResponse(res, 500, 'Internal server failure');
     }
   }
 
   static async getAllProfiles(req: Request, res: Response) {
+    const validatedQuery = validateListQuery(req.query);
+    if (!validatedQuery.valid) {
+      return errorResponse(res, 422, 'Invalid query parameters');
+    }
+
     try {
       await initializeDatabase();
-      const {
-        gender,
-        country_id,
-        age_group,
-        min_age,
-        max_age,
-        min_gender_probability,
-        min_country_probability,
-        sort_by,
-        order,
-        page = '1',
-        limit = '10',
-      } = req.query;
-
       const profileRepository = AppDataSource.getRepository(Profile);
       const queryBuilder = profileRepository.createQueryBuilder("profile");
 
       // Apply filters
-      if (gender) {
-        queryBuilder.andWhere("LOWER(profile.gender) = :gender", { gender: (gender as string).toLowerCase() });
+      if (validatedQuery.gender) {
+        queryBuilder.andWhere("LOWER(profile.gender) = :gender", { gender: validatedQuery.gender });
       }
-      if (country_id) {
-        queryBuilder.andWhere("UPPER(profile.country_id) = :country_id", { country_id: (country_id as string).toUpperCase() });
+      if (validatedQuery.country_id) {
+        queryBuilder.andWhere("UPPER(profile.country_id) = :country_id", { country_id: validatedQuery.country_id });
       }
-      if (age_group) {
-        queryBuilder.andWhere("LOWER(profile.age_group) = :age_group", { age_group: (age_group as string).toLowerCase() });
+      if (validatedQuery.age_group) {
+        queryBuilder.andWhere("LOWER(profile.age_group) = :age_group", { age_group: validatedQuery.age_group });
       }
-      if (min_age) {
-        const minAgeNum = parseInt(min_age as string, 10);
-        if (!isNaN(minAgeNum)) {
-          queryBuilder.andWhere("profile.age >= :min_age", { min_age: minAgeNum });
-        }
+      if (validatedQuery.min_age !== undefined) {
+        queryBuilder.andWhere("profile.age >= :min_age", { min_age: validatedQuery.min_age });
       }
-      if (max_age) {
-        const maxAgeNum = parseInt(max_age as string, 10);
-        if (!isNaN(maxAgeNum)) {
-          queryBuilder.andWhere("profile.age <= :max_age", { max_age: maxAgeNum });
-        }
+      if (validatedQuery.max_age !== undefined) {
+        queryBuilder.andWhere("profile.age <= :max_age", { max_age: validatedQuery.max_age });
       }
-      if (min_gender_probability) {
-        const prob = parseFloat(min_gender_probability as string);
-        if (!isNaN(prob)) {
-          queryBuilder.andWhere("profile.gender_probability >= :min_gender_probability", { min_gender_probability: prob });
-        }
+      if (validatedQuery.min_gender_probability !== undefined) {
+        queryBuilder.andWhere("profile.gender_probability >= :min_gender_probability", {
+          min_gender_probability: validatedQuery.min_gender_probability,
+        });
       }
-      if (min_country_probability) {
-        const prob = parseFloat(min_country_probability as string);
-        if (!isNaN(prob)) {
-          queryBuilder.andWhere("profile.country_probability >= :min_country_probability", { min_country_probability: prob });
-        }
+      if (validatedQuery.min_country_probability !== undefined) {
+        queryBuilder.andWhere("profile.country_probability >= :min_country_probability", {
+          min_country_probability: validatedQuery.min_country_probability,
+        });
       }
 
       // Get total count before pagination
@@ -195,66 +376,30 @@ export class ProfileController {
 
       // Apply sorting
       let sortColumn = 'profile.created_at';
-      let sortOrder: 'ASC' | 'DESC' = 'DESC';
-
-      if (sort_by) {
-        const sortByStr = (sort_by as string).toLowerCase();
-        if (sortByStr === 'age') {
-          sortColumn = 'profile.age';
-        } else if (sortByStr === 'created_at') {
-          sortColumn = 'profile.created_at';
-        } else if (sortByStr === 'gender_probability') {
-          sortColumn = 'profile.gender_probability';
-        }
+      if (validatedQuery.sort_by === 'age') {
+        sortColumn = 'profile.age';
+      } else if (validatedQuery.sort_by === 'gender_probability') {
+        sortColumn = 'profile.gender_probability';
       }
 
-      if (order) {
-        const orderStr = (order as string).toLowerCase();
-        if (orderStr === 'asc') {
-          sortOrder = 'ASC';
-        }
-      }
-
-      queryBuilder.orderBy(sortColumn, sortOrder);
-
-      // Apply pagination
-      let pageNum = 1;
-      let limitNum = 10;
-
-      if (page) {
-        const pageVal = parseInt(page as string, 10);
-        if (!isNaN(pageVal) && pageVal > 0) {
-          pageNum = pageVal;
-        }
-      }
-
-      if (limit) {
-        const limitVal = parseInt(limit as string, 10);
-        if (!isNaN(limitVal) && limitVal > 0 && limitVal <= 50) {
-          limitNum = limitVal;
-        }
-      }
-
-      const skip = (pageNum - 1) * limitNum;
-      queryBuilder.skip(skip).take(limitNum);
+      queryBuilder.orderBy(sortColumn, validatedQuery.order ?? 'DESC');
+      queryBuilder.skip((validatedQuery.page - 1) * validatedQuery.limit).take(validatedQuery.limit);
 
       const profiles = await queryBuilder.getMany();
 
       return res.status(200).json({
         status: 'success',
-        page: pageNum,
-        limit: limitNum,
+        page: validatedQuery.page,
+        limit: validatedQuery.limit,
         total,
-        data: profiles.map(p => ({
-          ...p,
-          created_at: p.created_at.toISOString(),
-        })),
+        data: profiles.map(serializeProfile),
       });
     } catch (error) {
-      return res.status(500).json({
-        status: 'error',
-        message: 'Internal server failure',
-      });
+      try {
+        return localListResponse(res, validatedQuery);
+      } catch {
+        return errorResponse(res, 500, 'Internal server failure');
+      }
     }
   }
 
@@ -266,43 +411,35 @@ export class ProfileController {
       
       const profile = await profileRepository.findOneBy({ id });
       if (!profile) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Profile not found',
-        });
+        return errorResponse(res, 404, 'Profile not found');
       }
 
       await profileRepository.remove(profile);
 
       return res.status(204).send();
     } catch (error) {
-      return res.status(500).json({
-        status: 'error',
-        message: 'Internal server failure',
-      });
+      return errorResponse(res, 500, 'Internal server failure');
     }
   }
 
   static async searchProfiles(req: Request, res: Response) {
+    const { q } = req.query;
+    const pagination = validateSearchPagination(req.query);
+    if (!pagination.valid) {
+      return errorResponse(res, 422, 'Invalid query parameters');
+    }
+
+    if (!q || Array.isArray(q) || !(q as string).trim()) {
+      return errorResponse(res, 400, 'Missing or empty "q" parameter');
+    }
+
+    const parsedQuery = parseNaturalLanguageQuery(q as string);
+    if (!parsedQuery) {
+      return errorResponse(res, 422, 'Unable to interpret query');
+    }
+
     try {
       await initializeDatabase();
-      const { q, page = '1', limit = '10' } = req.query;
-
-      if (!q || Array.isArray(q) || !(q as string).trim()) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Missing or empty "q" parameter',
-        });
-      }
-
-      const parsedQuery = parseNaturalLanguageQuery(q as string);
-      if (!parsedQuery) {
-        return res.status(422).json({
-          status: 'error',
-          message: 'Unable to interpret query',
-        });
-      }
-
       const profileRepository = AppDataSource.getRepository(Profile);
       const queryBuilder = profileRepository.createQueryBuilder("profile");
 
@@ -341,44 +478,23 @@ export class ProfileController {
 
       // Apply sorting and pagination
       queryBuilder.orderBy("profile.created_at", "DESC");
-
-      let pageNum = 1;
-      let limitNum = 10;
-
-      if (page) {
-        const pageVal = parseInt(page as string, 10);
-        if (!isNaN(pageVal) && pageVal > 0) {
-          pageNum = pageVal;
-        }
-      }
-
-      if (limit) {
-        const limitVal = parseInt(limit as string, 10);
-        if (!isNaN(limitVal) && limitVal > 0 && limitVal <= 50) {
-          limitNum = limitVal;
-        }
-      }
-
-      const skip = (pageNum - 1) * limitNum;
-      queryBuilder.skip(skip).take(limitNum);
+      queryBuilder.skip((pagination.page - 1) * pagination.limit).take(pagination.limit);
 
       const profiles = await queryBuilder.getMany();
 
       return res.status(200).json({
         status: 'success',
-        page: pageNum,
-        limit: limitNum,
+        page: pagination.page,
+        limit: pagination.limit,
         total,
-        data: profiles.map(p => ({
-          ...p,
-          created_at: p.created_at.toISOString(),
-        })),
+        data: profiles.map(serializeProfile),
       });
     } catch (error) {
-      return res.status(500).json({
-        status: 'error',
-        message: 'Internal server failure',
-      });
+      try {
+        return localSearchResponse(res, parsedQuery, pagination);
+      } catch {
+        return errorResponse(res, 500, 'Internal server failure');
+      }
     }
   }
 }

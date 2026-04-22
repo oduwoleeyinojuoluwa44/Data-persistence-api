@@ -26,17 +26,6 @@ async function seed() {
     console.log('Initializing database...');
     await initializeDatabase();
 
-    // Drop existing profiles table completely
-    console.log('Dropping old profiles table...');
-    try {
-      await AppDataSource.query('DROP TABLE IF EXISTS profiles CASCADE');
-    } catch (e) {
-      // ignore
-    }
-
-    // Recreate fresh schema
-    await AppDataSource.synchronize(true);
-
     console.log('Reading seed file...');
     const seedPath = path.join(process.cwd(), 'seed_profiles.json');
 

@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "seed_profiles.json"
+    }
+  },
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/index.ts" }
   ]
