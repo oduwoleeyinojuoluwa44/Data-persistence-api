@@ -1,6 +1,9 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { Profile } from '../entities/Profile';
+import { User } from '../entities/User';
+import { Session } from '../entities/Session';
+import { RequestLog } from '../entities/RequestLog';
 
 let schemaReady = false;
 
@@ -9,7 +12,7 @@ export const AppDataSource = new DataSource({
     url: (process.env.POSTGRES_URL || process.env.DATABASE_URL || "").trim(),
     synchronize: false,
     logging: false,
-    entities: [Profile],
+    entities: [Profile, User, Session, RequestLog],
     ssl: { rejectUnauthorized: false }
 });
 
@@ -62,12 +65,68 @@ const ensureProfileSchema = async () => {
     await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_created_at ON profiles (created_at)`);
 };
 
+const ensureAuthSchema = async () => {
+    // Create users table
+    await AppDataSource.query(`
+        CREATE TABLE IF NOT EXISTS users (
+            id uuid PRIMARY KEY,
+            email varchar NOT NULL UNIQUE,
+            github_id varchar UNIQUE,
+            password_hash varchar,
+            role varchar NOT NULL DEFAULT 'analyst',
+            is_active boolean DEFAULT true,
+            created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_users_github_id ON users (github_id)`);
+
+    // Create sessions table
+    await AppDataSource.query(`
+        CREATE TABLE IF NOT EXISTS sessions (
+            id uuid PRIMARY KEY,
+            user_id uuid NOT NULL REFERENCES users(id),
+            access_token varchar NOT NULL,
+            refresh_token varchar NOT NULL,
+            access_token_expires_at timestamptz NOT NULL,
+            refresh_token_expires_at timestamptz NOT NULL,
+            revoked_at timestamptz,
+            created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_used_at timestamptz
+        )
+    `);
+
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_sessions_access_token ON sessions (access_token)`);
+
+    // Create request_logs table
+    await AppDataSource.query(`
+        CREATE TABLE IF NOT EXISTS request_logs (
+            id uuid PRIMARY KEY,
+            user_id uuid,
+            endpoint varchar NOT NULL,
+            method varchar NOT NULL,
+            status_code integer NOT NULL,
+            ip_address varchar,
+            response_time_ms integer,
+            created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_request_logs_user_id_created ON request_logs (user_id, created_at)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs (created_at)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_request_logs_endpoint ON request_logs (endpoint)`);
+};
+
 export const initializeDatabase = async () => {
     if (!AppDataSource.isInitialized) {
         await AppDataSource.initialize();
     }
     if (!schemaReady) {
         await ensureProfileSchema();
+        await ensureAuthSchema();
         schemaReady = true;
     }
     return AppDataSource;

@@ -498,4 +498,75 @@ export class ProfileController {
       }
     }
   }
+
+  static async exportProfilesCSV(req: Request, res: Response) {
+    try {
+      await initializeDatabase();
+      const profileRepository = AppDataSource.getRepository(Profile);
+      
+      // Get all profiles (respecting filters if passed)
+      const queryBuilder = profileRepository.createQueryBuilder("profile");
+
+      // Apply same filters as getAllProfiles
+      const { gender, country_id, age_group, min_age, max_age, min_gender_probability, min_country_probability } = req.query;
+
+      if (gender && typeof gender === 'string') {
+        queryBuilder.andWhere("LOWER(profile.gender) = :gender", { gender: gender.toLowerCase() });
+      }
+      if (age_group && typeof age_group === 'string') {
+        queryBuilder.andWhere("LOWER(profile.age_group) = :age_group", { age_group: age_group.toLowerCase() });
+      }
+      if (country_id && typeof country_id === 'string') {
+        queryBuilder.andWhere("UPPER(profile.country_id) = :country_id", { country_id: country_id.toUpperCase() });
+      }
+
+      if (min_age && typeof min_age === 'string') {
+        const age = parseInt(min_age, 10);
+        if (!isNaN(age)) {
+          queryBuilder.andWhere("profile.age >= :min_age", { min_age: age });
+        }
+      }
+
+      if (max_age && typeof max_age === 'string') {
+        const age = parseInt(max_age, 10);
+        if (!isNaN(age)) {
+          queryBuilder.andWhere("profile.age <= :max_age", { max_age: age });
+        }
+      }
+
+      if (min_gender_probability && typeof min_gender_probability === 'string') {
+        const prob = parseFloat(min_gender_probability);
+        if (!isNaN(prob)) {
+          queryBuilder.andWhere("profile.gender_probability >= :min_gender_probability", { min_gender_probability: prob });
+        }
+      }
+
+      if (min_country_probability && typeof min_country_probability === 'string') {
+        const prob = parseFloat(min_country_probability);
+        if (!isNaN(prob)) {
+          queryBuilder.andWhere("profile.country_probability >= :min_country_probability", { min_country_probability: prob });
+        }
+      }
+
+      const profiles = await queryBuilder.orderBy("profile.created_at", "DESC").getMany();
+
+      // Generate CSV
+      const csvHeader = 'id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at\n';
+      const csvRows = profiles.map(profile => {
+        const createdAt = profile.created_at instanceof Date 
+          ? profile.created_at.toISOString() 
+          : new Date(profile.created_at).toISOString();
+        return `"${profile.id}","${profile.name.replace(/"/g, '""')}","${profile.gender}",${profile.gender_probability},${profile.age},"${profile.age_group}","${profile.country_id}","${profile.country_name.replace(/"/g, '""')}",${profile.country_probability},"${createdAt}"`;
+      }).join('\n');
+
+      const csv = csvHeader + csvRows;
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="profiles-${new Date().toISOString()}.csv"`);
+      res.send(csv);
+    } catch (error) {
+      return errorResponse(res, 500, 'Failed to export profiles');
+    }
+  }
 }
+
