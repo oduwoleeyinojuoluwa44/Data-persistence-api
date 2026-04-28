@@ -9,12 +9,15 @@ import { createUserRateLimiter } from './middleware/rateLimit.middleware';
 const app = express();
 
 // Middleware
-app.use(cors({
-  origin: process.env.CORS_ORIGINS?.split(',') || '*',
+const corsOrigins = process.env.CORS_ORIGINS?.split(',').map(o => o.trim()) || ['*'];
+const corsOptions = {
+  origin: corsOrigins.includes('*') ? '*' : corsOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+  credentials: corsOrigins.includes('*') ? false : true
+};
+
+app.use(cors(corsOptions));
 
 app.use(express.json());
 app.use(cookieParser());
