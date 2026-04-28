@@ -9,15 +9,27 @@ import { createUserRateLimiter } from './middleware/rateLimit.middleware';
 const app = express();
 
 // Middleware
-const corsOrigins = process.env.CORS_ORIGINS?.split(',').map(o => o.trim()) || ['*'];
+// Default origins include local dev and the deployed web portal. If CORS_ORIGINS
+// is provided in the environment it will be used instead. In production we must
+// reflect the request origin (not use '*') when credentials are enabled.
+const defaultOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173', 'https://web-portal-deploy.vercel.app'];
+const corsOrigins = process.env.CORS_ORIGINS?.split(',').map(o => o.trim()) || defaultOrigins;
+
 const corsOptions = {
-  origin: corsOrigins.includes('*') ? '*' : corsOrigins,
+  origin: (origin: any, callback: any) => {
+    // Allow non-browser requests (curl, server-to-server) with no origin
+    if (!origin) return callback(null, true);
+    if (corsOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
-  credentials: corsOrigins.includes('*') ? false : true
+  credentials: true,
 };
 
 app.use(cors(corsOptions));
+// Note: when the origin function approves the request, the cors middleware will
+// reflect that origin in Access-Control-Allow-Origin and include Access-Control-Allow-Credentials: true.
 
 app.use(express.json());
 app.use(cookieParser());
