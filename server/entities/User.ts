@@ -14,6 +14,12 @@ export class User {
   github_id?: string;
 
   @Column({ nullable: true })
+  username?: string;
+
+  @Column({ nullable: true })
+  avatar_url?: string;
+
+  @Column({ nullable: true })
   password_hash?: string;
 
   @Column({
@@ -25,6 +31,9 @@ export class User {
 
   @Column({ default: true })
   is_active!: boolean;
+
+  @Column('timestamptz', { nullable: true })
+  last_login_at?: Date;
 
   @CreateDateColumn()
   created_at!: Date;

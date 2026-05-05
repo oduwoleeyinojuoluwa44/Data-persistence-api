@@ -13,7 +13,12 @@ export const AppDataSource = new DataSource({
     synchronize: false,
     logging: false,
     entities: [Profile, User, Session, RequestLog],
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false },
+    extra: {
+        max: Number(process.env.DB_POOL_MAX || 10),
+        idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_TIMEOUT_MS || 30000),
+        connectionTimeoutMillis: Number(process.env.DB_POOL_CONNECTION_TIMEOUT_MS || 5000),
+    },
 });
 
 const ensureProfileSchema = async () => {
@@ -63,6 +68,10 @@ const ensureProfileSchema = async () => {
     await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_gender_probability ON profiles (gender_probability)`);
     await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_country_probability ON profiles (country_probability)`);
     await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_created_at ON profiles (created_at)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_country_gender_age ON profiles (country_id, gender, age)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_gender_age_group ON profiles (gender, age_group)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_country_age_group ON profiles (country_id, age_group)`);
+    await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_profiles_created_at_id ON profiles (created_at DESC, id)`);
 };
 
 const ensureAuthSchema = async () => {
@@ -82,6 +91,9 @@ const ensureAuthSchema = async () => {
 
     await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)`);
     await AppDataSource.query(`CREATE INDEX IF NOT EXISTS idx_users_github_id ON users (github_id)`);
+    await AppDataSource.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS username varchar`);
+    await AppDataSource.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url varchar`);
+    await AppDataSource.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at timestamptz`);
 
     // Create sessions table
     await AppDataSource.query(`

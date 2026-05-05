@@ -8,15 +8,17 @@
     "start": "node dist/api/index.js",
     "build": "tsc",
     "test": "jest --runInBand --detectOpenHandles",
-    "seed": "ts-node api/scripts/seed.ts"
+    "seed": "ts-node server/scripts/seed.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@types/busboy": "^1.5.4",
     "axios": "^1.15.0",
     "bcryptjs": "^2.4.3",
+    "busboy": "^1.6.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
     "dotenv": "^16.0.3",

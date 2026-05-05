@@ -199,8 +199,8 @@ const COUNTRY_MAPPING: Record<string, string | null> = {
 };
 
 const AGE_MAPPINGS: Record<string, { min: number; max: number }> = {
-  young: { min: 16, max: 24 },
-  youth: { min: 16, max: 24 },
+  young: { min: 18, max: 35 },
+  youth: { min: 18, max: 35 },
   teenager: { min: 13, max: 19 },
   teen: { min: 13, max: 19 },
   elderly: { min: 65, max: 150 },
@@ -233,13 +233,23 @@ export function parseNaturalLanguageQuery(query: string): ParsedQuery | null {
   }
 
   const result: ParsedQuery = {};
+  const rangeMatch = lowerQuery.match(/(?:between\s+(?:ages?\s+)?)?(\d{1,3})\s*(?:-|–|to|and)\s*(\d{1,3})/);
+  if (rangeMatch) {
+    const first = Number.parseInt(rangeMatch[1], 10);
+    const second = Number.parseInt(rangeMatch[2], 10);
+    if (Number.isInteger(first) && Number.isInteger(second)) {
+      result.min_age = Math.min(first, second);
+      result.max_age = Math.max(first, second);
+    }
+  }
+
   const words = lowerQuery.split(/\s+/).map(normalizeToken).filter(Boolean);
 
   const genders: Set<string> = new Set();
   const ageGroups: Set<string> = new Set();
   let countryId: string | undefined;
-  let minAge: number | undefined;
-  let maxAge: number | undefined;
+  let minAge: number | undefined = result.min_age;
+  let maxAge: number | undefined = result.max_age;
 
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
@@ -261,7 +271,13 @@ export function parseNaturalLanguageQuery(query: string): ParsedQuery | null {
       continue;
     }
 
-    if (word === 'above' || word === 'over' || word === 'older') {
+    if (word === 'aged' && /^\d+$/.test(nextWord) && result.min_age === undefined && result.max_age === undefined) {
+      const age = parseInt(nextWord, 10);
+      if (age >= 0 && age <= 150) {
+        minAge = setMinAge(minAge, age);
+        maxAge = setMaxAge(maxAge, age);
+      }
+    } else if (word === 'above' || word === 'over' || word === 'older') {
       const ageStr = nextWord;
       if (/^\d+$/.test(ageStr)) {
         minAge = setMinAge(minAge, parseInt(ageStr, 10));

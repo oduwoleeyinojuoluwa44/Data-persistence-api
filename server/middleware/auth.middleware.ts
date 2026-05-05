@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { TokenService, TokenPayload } from '../services/token.service';
-import { AppDataSource } from '../database/data-source';
+import { AppDataSource, initializeDatabase } from '../database/data-source';
 import { RequestLog } from '../entities/RequestLog';
+import { User } from '../entities/User';
 import { uuidv7 } from 'uuidv7';
 
 declare global {
@@ -14,19 +15,29 @@ declare global {
   }
 }
 
-export const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const authHeader = req.headers.authorization;
+    const cookieToken = req.cookies?.access_token;
     
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if ((!authHeader || !authHeader.startsWith('Bearer ')) && !cookieToken) {
       return res.status(401).json({
         status: 'error',
         message: 'Missing or invalid authorization header'
       });
     }
 
-    const token = authHeader.slice(7);
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : cookieToken;
     const payload = TokenService.verifyAccessToken(token);
+    await initializeDatabase();
+
+    const user = await AppDataSource.getRepository(User).findOneBy({ id: payload.userId });
+    if (!user || !user.is_active) {
+      return res.status(403).json({
+        status: 'error',
+        message: 'Forbidden',
+      });
+    }
     
     req.user = payload;
     next();
@@ -38,15 +49,20 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction) 
   }
 };
 
-export const optionalAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
+export const optionalAuthMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const authHeader = req.headers.authorization;
+    const cookieToken = req.cookies?.access_token;
     
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7);
+    if ((authHeader && authHeader.startsWith('Bearer ')) || cookieToken) {
+      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : cookieToken;
       try {
         const payload = TokenService.verifyAccessToken(token);
-        req.user = payload;
+        await initializeDatabase();
+        const user = await AppDataSource.getRepository(User).findOneBy({ id: payload.userId });
+        if (user?.is_active) {
+          req.user = payload;
+        }
       } catch (error) {
         // Silent fail for optional auth
       }
@@ -125,7 +141,10 @@ async function logRequest(data: {
     requestLog.ip_address = data.ipAddress;
     requestLog.response_time_ms = data.responseTimeMs;
 
-    await db.getRepository(RequestLog).save(requestLog);
+    const repository = db.getRepository(RequestLog);
+    if (!repository) return;
+
+    await repository.save(requestLog);
   } catch (error) {
     console.error('Error logging request:', error);
   }

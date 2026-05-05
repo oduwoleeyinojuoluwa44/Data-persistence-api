@@ -1,10 +1,19 @@
 import { Request, Response } from 'express';
+import Busboy from 'busboy';
+import { Readable } from 'stream';
 import { uuidv7 } from 'uuidv7';
 import { ExternalApiService } from '../services/externalApi.service';
 import { getAgeGroup } from '../utils/classification';
 import { getCountryName } from '../utils/countryNames';
 import { ParsedQuery, parseNaturalLanguageQuery } from '../utils/queryParser';
 import { getLocalSeedProfiles } from '../utils/localProfiles';
+import {
+  getCachedProfileQuery,
+  invalidateProfileQueryCache,
+  profileCacheKey,
+  setCachedProfileQuery,
+} from '../utils/queryCache';
+import { ingestProfilesCsv } from '../services/csvIngestion.service';
 import { z } from 'zod';
 import { AppDataSource, initializeDatabase } from '../database/data-source';
 import { Profile } from '../entities/Profile';
@@ -29,6 +38,7 @@ const LIST_QUERY_KEYS = new Set([
   'order',
   'page',
   'limit',
+  'format',
 ]);
 const SEARCH_QUERY_KEYS = new Set(['q', 'page', 'limit']);
 const INTERNAL_QUERY_KEYS = new Set(['path']);
@@ -49,6 +59,16 @@ type QueryValidationResult =
       order?: 'ASC' | 'DESC';
     }
   | { valid: false };
+
+type ListResponseBody = {
+  status: 'success';
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+  links: ReturnType<typeof paginationLinks>['links'];
+  data: ReturnType<typeof serializeProfile>[];
+};
 
 function errorResponse(res: Response, status: number, message: string) {
   return res.status(status).json({ status: 'error', message });
@@ -130,37 +150,99 @@ function applyParsedFilters(profiles: Profile[], parsedQuery: ParsedQuery): Prof
   });
 }
 
+function canonicalListQuery(query: Extract<QueryValidationResult, { valid: true }>) {
+  return {
+    gender: query.gender,
+    country_id: query.country_id,
+    age_group: query.age_group,
+    min_age: query.min_age,
+    max_age: query.max_age,
+    min_gender_probability: query.min_gender_probability,
+    min_country_probability: query.min_country_probability,
+    sort_by: query.sort_by || 'created_at',
+    order: query.order || 'DESC',
+    page: query.page,
+    limit: query.limit,
+  };
+}
+
+function canonicalParsedQuery(parsedQuery: ParsedQuery, pagination: { page: number; limit: number }) {
+  return {
+    gender: parsedQuery.gender?.toLowerCase(),
+    country_id: parsedQuery.country_id?.toUpperCase(),
+    age_group: parsedQuery.age_group ? [...parsedQuery.age_group].map((value) => value.toLowerCase()).sort().join(',') : undefined,
+    min_age: parsedQuery.min_age,
+    max_age: parsedQuery.max_age,
+    min_gender_probability: parsedQuery.min_gender_probability,
+    min_country_probability: parsedQuery.min_country_probability,
+    sort_by: 'created_at',
+    order: 'DESC',
+    page: pagination.page,
+    limit: pagination.limit,
+  };
+}
+
 function paginateProfiles(profiles: Profile[], page: number, limit: number): Profile[] {
   return profiles.slice((page - 1) * limit, page * limit);
 }
 
-function localListResponse(res: Response, query: Extract<QueryValidationResult, { valid: true }>) {
+function paginationLinks(req: Request, page: number, limit: number, total: number) {
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const buildLink = (targetPage: number) => {
+    const query = new URLSearchParams();
+    Object.entries(req.query).forEach(([key, value]) => {
+      if (key === 'page' || value === undefined || Array.isArray(value)) return;
+      query.set(key, String(value));
+    });
+    query.set('page', String(targetPage));
+    query.set('limit', String(limit));
+    return `${req.baseUrl}${req.path}?${query.toString()}`;
+  };
+
+  return {
+    total_pages: totalPages,
+    links: {
+      self: buildLink(page),
+      next: page < totalPages ? buildLink(page + 1) : null,
+      prev: page > 1 ? buildLink(page - 1) : null,
+    },
+  };
+}
+
+function localListResponse(req: Request, res: Response, query: Extract<QueryValidationResult, { valid: true }>) {
   const filtered = applyValidatedFilters(getLocalSeedProfiles(), query);
   const sortDirection = query.order === 'ASC' ? 1 : -1;
   const sorted = [...filtered].sort((a, b) => compareProfiles(a, b, query.sort_by) * sortDirection);
+  const pagination = paginationLinks(req, query.page, query.limit, sorted.length);
 
   return res.status(200).json({
     status: 'success',
     page: query.page,
     limit: query.limit,
     total: sorted.length,
+    total_pages: pagination.total_pages,
+    links: pagination.links,
     data: paginateProfiles(sorted, query.page, query.limit).map(serializeProfile),
   });
 }
 
 function localSearchResponse(
+  req: Request,
   res: Response,
   parsedQuery: ParsedQuery,
   pagination: { page: number; limit: number },
 ) {
   const filtered = applyParsedFilters(getLocalSeedProfiles(), parsedQuery);
   const sorted = [...filtered].sort((a, b) => compareProfiles(a, b) * -1);
+  const links = paginationLinks(req, pagination.page, pagination.limit, sorted.length);
 
   return res.status(200).json({
     status: 'success',
     page: pagination.page,
     limit: pagination.limit,
     total: sorted.length,
+    total_pages: links.total_pages,
+    links: links.links,
     data: paginateProfiles(sorted, pagination.page, pagination.limit).map(serializeProfile),
   });
 }
@@ -294,6 +376,7 @@ export class ProfileController {
       });
 
       await profileRepository.save(profile);
+      invalidateProfileQueryCache();
 
       return res.status(201).json({
         status: 'success',
@@ -340,6 +423,13 @@ export class ProfileController {
       return errorResponse(res, 422, 'Invalid query parameters');
     }
 
+    const cacheKey = profileCacheKey('profiles:list', canonicalListQuery(validatedQuery));
+    const cached = getCachedProfileQuery<ListResponseBody>(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', 'HIT');
+      return res.status(200).json(cached);
+    }
+
     try {
       await initializeDatabase();
       const profileRepository = AppDataSource.getRepository(Profile);
@@ -347,13 +437,13 @@ export class ProfileController {
 
       // Apply filters
       if (validatedQuery.gender) {
-        queryBuilder.andWhere("LOWER(profile.gender) = :gender", { gender: validatedQuery.gender });
+        queryBuilder.andWhere("profile.gender = :gender", { gender: validatedQuery.gender });
       }
       if (validatedQuery.country_id) {
-        queryBuilder.andWhere("UPPER(profile.country_id) = :country_id", { country_id: validatedQuery.country_id });
+        queryBuilder.andWhere("profile.country_id = :country_id", { country_id: validatedQuery.country_id });
       }
       if (validatedQuery.age_group) {
-        queryBuilder.andWhere("LOWER(profile.age_group) = :age_group", { age_group: validatedQuery.age_group });
+        queryBuilder.andWhere("profile.age_group = :age_group", { age_group: validatedQuery.age_group });
       }
       if (validatedQuery.min_age !== undefined) {
         queryBuilder.andWhere("profile.age >= :min_age", { min_age: validatedQuery.min_age });
@@ -388,16 +478,20 @@ export class ProfileController {
 
       const profiles = await queryBuilder.getMany();
 
-      return res.status(200).json({
+      const responseBody: ListResponseBody = {
         status: 'success',
         page: validatedQuery.page,
         limit: validatedQuery.limit,
         total,
+        ...paginationLinks(req, validatedQuery.page, validatedQuery.limit, total),
         data: profiles.map(serializeProfile),
-      });
+      };
+      setCachedProfileQuery(cacheKey, responseBody);
+      res.setHeader('X-Cache', 'MISS');
+      return res.status(200).json(responseBody);
     } catch (error) {
       try {
-        return localListResponse(res, validatedQuery);
+        return localListResponse(req, res, validatedQuery);
       } catch {
         return errorResponse(res, 500, 'Internal server failure');
       }
@@ -416,6 +510,7 @@ export class ProfileController {
       }
 
       await profileRepository.remove(profile);
+      invalidateProfileQueryCache();
 
       return res.status(204).send();
     } catch (error) {
@@ -439,6 +534,13 @@ export class ProfileController {
       return errorResponse(res, 422, 'Unable to interpret query');
     }
 
+    const cacheKey = profileCacheKey('profiles:search', canonicalParsedQuery(parsedQuery, pagination));
+    const cached = getCachedProfileQuery<ListResponseBody>(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', 'HIT');
+      return res.status(200).json(cached);
+    }
+
     try {
       await initializeDatabase();
       const profileRepository = AppDataSource.getRepository(Profile);
@@ -446,16 +548,16 @@ export class ProfileController {
 
       // Apply parsed query filters
       if (parsedQuery.gender) {
-        queryBuilder.andWhere("LOWER(profile.gender) = :gender", { gender: parsedQuery.gender.toLowerCase() });
+        queryBuilder.andWhere("profile.gender = :gender", { gender: parsedQuery.gender.toLowerCase() });
       }
 
       if (parsedQuery.age_group && parsedQuery.age_group.length > 0) {
         // Use first age group
-        queryBuilder.andWhere("LOWER(profile.age_group) = :age_group", { age_group: parsedQuery.age_group[0].toLowerCase() });
+        queryBuilder.andWhere("profile.age_group = :age_group", { age_group: parsedQuery.age_group[0].toLowerCase() });
       }
 
       if (parsedQuery.country_id) {
-        queryBuilder.andWhere("UPPER(profile.country_id) = :country_id", { country_id: parsedQuery.country_id.toUpperCase() });
+        queryBuilder.andWhere("profile.country_id = :country_id", { country_id: parsedQuery.country_id.toUpperCase() });
       }
 
       if (parsedQuery.min_age !== undefined) {
@@ -483,16 +585,20 @@ export class ProfileController {
 
       const profiles = await queryBuilder.getMany();
 
-      return res.status(200).json({
+      const responseBody: ListResponseBody = {
         status: 'success',
         page: pagination.page,
         limit: pagination.limit,
         total,
+        ...paginationLinks(req, pagination.page, pagination.limit, total),
         data: profiles.map(serializeProfile),
-      });
+      };
+      setCachedProfileQuery(cacheKey, responseBody);
+      res.setHeader('X-Cache', 'MISS');
+      return res.status(200).json(responseBody);
     } catch (error) {
       try {
-        return localSearchResponse(res, parsedQuery, pagination);
+        return localSearchResponse(req, res, parsedQuery, pagination);
       } catch {
         return errorResponse(res, 500, 'Internal server failure');
       }
@@ -500,6 +606,11 @@ export class ProfileController {
   }
 
   static async exportProfilesCSV(req: Request, res: Response) {
+    const validatedQuery = validateListQuery(req.query);
+    if (!validatedQuery.valid || singleQueryValue(req.query.format) !== 'csv') {
+      return errorResponse(res, 422, 'Invalid query parameters');
+    }
+
     try {
       await initializeDatabase();
       const profileRepository = AppDataSource.getRepository(Profile);
@@ -508,47 +619,35 @@ export class ProfileController {
       const queryBuilder = profileRepository.createQueryBuilder("profile");
 
       // Apply same filters as getAllProfiles
-      const { gender, country_id, age_group, min_age, max_age, min_gender_probability, min_country_probability } = req.query;
+      const { gender, country_id, age_group, min_age, max_age, min_gender_probability, min_country_probability, sort_by, order } = validatedQuery;
 
-      if (gender && typeof gender === 'string') {
-        queryBuilder.andWhere("LOWER(profile.gender) = :gender", { gender: gender.toLowerCase() });
+      if (gender) {
+        queryBuilder.andWhere("profile.gender = :gender", { gender });
       }
-      if (age_group && typeof age_group === 'string') {
-        queryBuilder.andWhere("LOWER(profile.age_group) = :age_group", { age_group: age_group.toLowerCase() });
+      if (age_group) {
+        queryBuilder.andWhere("profile.age_group = :age_group", { age_group });
       }
-      if (country_id && typeof country_id === 'string') {
-        queryBuilder.andWhere("UPPER(profile.country_id) = :country_id", { country_id: country_id.toUpperCase() });
+      if (country_id) {
+        queryBuilder.andWhere("profile.country_id = :country_id", { country_id });
       }
-
-      if (min_age && typeof min_age === 'string') {
-        const age = parseInt(min_age, 10);
-        if (!isNaN(age)) {
-          queryBuilder.andWhere("profile.age >= :min_age", { min_age: age });
-        }
+      if (min_age !== undefined) {
+        queryBuilder.andWhere("profile.age >= :min_age", { min_age });
       }
-
-      if (max_age && typeof max_age === 'string') {
-        const age = parseInt(max_age, 10);
-        if (!isNaN(age)) {
-          queryBuilder.andWhere("profile.age <= :max_age", { max_age: age });
-        }
+      if (max_age !== undefined) {
+        queryBuilder.andWhere("profile.age <= :max_age", { max_age });
+      }
+      if (min_gender_probability !== undefined) {
+        queryBuilder.andWhere("profile.gender_probability >= :min_gender_probability", { min_gender_probability });
+      }
+      if (min_country_probability !== undefined) {
+        queryBuilder.andWhere("profile.country_probability >= :min_country_probability", { min_country_probability });
       }
 
-      if (min_gender_probability && typeof min_gender_probability === 'string') {
-        const prob = parseFloat(min_gender_probability);
-        if (!isNaN(prob)) {
-          queryBuilder.andWhere("profile.gender_probability >= :min_gender_probability", { min_gender_probability: prob });
-        }
-      }
+      let sortColumn = 'profile.created_at';
+      if (sort_by === 'age') sortColumn = 'profile.age';
+      if (sort_by === 'gender_probability') sortColumn = 'profile.gender_probability';
 
-      if (min_country_probability && typeof min_country_probability === 'string') {
-        const prob = parseFloat(min_country_probability);
-        if (!isNaN(prob)) {
-          queryBuilder.andWhere("profile.country_probability >= :min_country_probability", { min_country_probability: prob });
-        }
-      }
-
-      const profiles = await queryBuilder.orderBy("profile.created_at", "DESC").getMany();
+      const profiles = await queryBuilder.orderBy(sortColumn, order ?? 'DESC').getMany();
 
       // Generate CSV
       const csvHeader = 'id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at\n';
@@ -562,11 +661,58 @@ export class ProfileController {
       const csv = csvHeader + csvRows;
 
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="profiles-${new Date().toISOString()}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="profiles_${new Date().toISOString()}.csv"`);
       res.send(csv);
     } catch (error) {
       return errorResponse(res, 500, 'Failed to export profiles');
     }
   }
-}
 
+  static async importProfilesCSV(req: Request, res: Response) {
+    try {
+      await initializeDatabase();
+      const contentType = req.headers['content-type'] || '';
+
+      if (contentType.includes('text/csv')) {
+        const summary = await ingestProfilesCsv(AppDataSource, req);
+        invalidateProfileQueryCache();
+        return res.status(200).json(summary);
+      }
+
+      if (!contentType.includes('multipart/form-data')) {
+        return errorResponse(res, 415, 'Upload must be multipart/form-data or text/csv');
+      }
+
+      const busboy = Busboy({ headers: req.headers });
+      let handledFile = false;
+      let uploadPromise: Promise<unknown> | null = null;
+
+      busboy.on('file', (_fieldName, file) => {
+        if (handledFile) {
+          file.resume();
+          return;
+        }
+        handledFile = true;
+        uploadPromise = ingestProfilesCsv(AppDataSource, file as Readable);
+      });
+
+      const finished = new Promise<void>((resolve, reject) => {
+        busboy.on('finish', () => resolve());
+        busboy.on('error', reject);
+      });
+
+      req.pipe(busboy);
+      await finished;
+
+      if (!uploadPromise) {
+        return errorResponse(res, 400, 'CSV file is required');
+      }
+
+      const summary = await uploadPromise;
+      invalidateProfileQueryCache();
+      return res.status(200).json(summary);
+    } catch (error) {
+      return errorResponse(res, 400, error instanceof Error ? error.message : 'CSV import failed');
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import request from 'supertest';
-import app from '../api/_app';
-import { AppDataSource, initializeDatabase } from '../api/database/data-source';
-import { Profile } from '../api/entities/Profile';
+import app from '../server/_app';
+import { AppDataSource, initializeDatabase } from '../server/database/data-source';
+import { Profile } from '../server/entities/Profile';
 
 describe('Stage 2: Advanced Profile Queries', () => {
   beforeAll(async () => {

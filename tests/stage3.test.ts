@@ -1,9 +1,9 @@
 import request from 'supertest';
-import app from '../api/_app';
-import { AppDataSource, initializeDatabase } from '../api/database/data-source';
-import { User } from '../api/entities/User';
-import { Session } from '../api/entities/Session';
-import { TokenService } from '../api/services/token.service';
+import app from '../server/_app';
+import { AppDataSource, initializeDatabase } from '../server/database/data-source';
+import { User } from '../server/entities/User';
+import { Session } from '../server/entities/Session';
+import { TokenService } from '../server/services/token.service';
 import { uuidv7 } from 'uuidv7';
 
 describe('Stage 3: Authentication & Authorization', () => {

@@ -14,6 +14,7 @@ export interface GitHubUser {
   id: number;
   login: string;
   email: string | null;
+  avatar_url?: string;
 }
 
 export class OAuthService {
@@ -36,10 +37,14 @@ export class OAuthService {
   /**
    * Generate GitHub authorization URL
    */
-  static getGitHubAuthorizationUrl(state: string, codeChallenge: string): string {
+  static getGitHubAuthorizationUrl(
+    state: string,
+    codeChallenge: string,
+    redirectUri = GITHUB_REDIRECT_URI
+  ): string {
     const params = new URLSearchParams({
       client_id: GITHUB_CLIENT_ID,
-      redirect_uri: GITHUB_REDIRECT_URI,
+      redirect_uri: redirectUri,
       scope: 'user:email',
       state,
       code_challenge: codeChallenge,
@@ -54,7 +59,8 @@ export class OAuthService {
    */
   static async exchangeCodeForToken(
     code: string,
-    codeVerifier: string
+    codeVerifier: string,
+    redirectUri = GITHUB_REDIRECT_URI
   ): Promise<{ accessToken: string; refreshToken?: string }> {
     try {
       const response = await axios.post(
@@ -64,7 +70,7 @@ export class OAuthService {
           client_secret: GITHUB_CLIENT_SECRET,
           code,
           code_verifier: codeVerifier,
-          redirect_uri: GITHUB_REDIRECT_URI,
+          redirect_uri: redirectUri,
         },
         {
           headers: {
@@ -125,6 +131,7 @@ export class OAuthService {
         id: response.data.id,
         login: response.data.login,
         email,
+        avatar_url: response.data.avatar_url,
       };
     } catch (error) {
       throw new Error(

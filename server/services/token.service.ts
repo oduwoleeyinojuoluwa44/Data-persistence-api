@@ -4,8 +4,8 @@ import { uuidv7 } from 'uuidv7';
 
 const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || 'access-secret-key-change-in-production';
 const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'refresh-secret-key-change-in-production';
-const ACCESS_TOKEN_EXPIRY = 15 * 60; // 15 minutes in seconds
-const REFRESH_TOKEN_EXPIRY = 7 * 24 * 60 * 60; // 7 days in seconds
+export const ACCESS_TOKEN_EXPIRY = 3 * 60; // 3 minutes in seconds
+export const REFRESH_TOKEN_EXPIRY = 5 * 60; // 5 minutes in seconds
 
 export interface TokenPayload {
   userId: string;
